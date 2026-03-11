@@ -1,0 +1,10 @@
+CompileFlags:
+  Add:
+    - -xc++
+    - -std=c++17
+    - -IC:/Users/Dhanush P Shetty/AndroidStudioProjects/BT_Agent/app/src/main/cpp/include
+    - -IC:/Users/Dhanush P Shetty/AndroidStudioProjects/BT_Agent/app/src/main/cpp/3rdparty
+    - -IC:/Users/Dhanush P Shetty/AndroidStudioProjects/BT_Agent/app/src/main/cpp/3rdparty/minitrace
+    - -IC:/Users/Dhanush P Shetty/AndroidStudioProjects/BT_Agent/app/src/main/cpp/3rdparty/tinyxml2
+    - -IC:/Users/Dhanush P Shetty/AndroidStudioProjects/BT_Agent/app/src/main/cpp/3rdparty/minicoro
+    - -IC:/Users/Dhanush P Shetty/AndroidStudioProjects/BT_Agent/app/src/main/cpp/3rdparty/lexy/include
