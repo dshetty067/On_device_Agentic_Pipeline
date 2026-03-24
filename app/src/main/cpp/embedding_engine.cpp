@@ -65,9 +65,7 @@ std::vector<float> embed_text(const std::string& text)
 
     // ✅ OPTIONAL: truncate for speed (E5 works best with short text)
     std::string input = text;
-    if (input.size() > 300) {
-        input = input.substr(0, 300);
-    }
+
 
     // 2-pass tokenize
     int n = llama_tokenize(

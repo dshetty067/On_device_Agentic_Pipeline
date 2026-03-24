@@ -10,13 +10,28 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.bt_agent.ui.theme.BT_AgentTheme
@@ -24,37 +39,50 @@ import java.io.File
 import java.io.FileOutputStream
 import kotlin.concurrent.thread
 
+// ── Data model ────────────────────────────────────────────────────────────────
+// ── Data model ────────────────────────────────────────────────────────────────
+data class ChatMessage(
+    val id: Long,   // ✅ FIXED (removed default timestamp)
+    val role: Role,
+    val text: String,
+    val isStreaming: Boolean = false
+) {
+    enum class Role { USER, ASSISTANT, STATUS }
+}
+
 class MainActivity : ComponentActivity() {
 
     companion object {
         init { System.loadLibrary("bt_agent_native") }
     }
 
+    // ✅ UNIQUE ID GENERATOR (NEW)
+    private var messageIdCounter = 0L
+    private fun generateUniqueId(): Long {
+        return ++messageIdCounter
+    }
+
     external fun loadModel(path: String)
     external fun loadEmbeddingModel(path: String)
     external fun generateText(pdfPath: String, storeDir: String, prompt: String): String
 
-
     // ── State ──────────────────────────────────────────────────────────────
-    private val isModelReady       = mutableStateOf(false)
-    private val loadingStatus      = mutableStateOf("Starting up...")
-    private val logs               = mutableStateListOf<Pair<String, LogLevel>>()
-    private val streamingResponse  = mutableStateOf("")
-    private val nodeStatus         = mutableStateOf("")
-    private val selectedPdfPath    = mutableStateOf<String?>(null)
-    private val selectedPdfName    = mutableStateOf("No PDF selected")
-
-    enum class LogLevel { INFO, SUCCESS, WARNING, ERROR }
-
-    private fun addLog(message: String, level: LogLevel = LogLevel.INFO) {
-        val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
-            .format(java.util.Date())
-        runOnUiThread { logs.add("[$ts] $message" to level) }
-    }
+    private val isModelReady      = mutableStateOf(false)
+    private val loadingStatus     = mutableStateOf("Starting up...")
+    private val isGenerating      = mutableStateOf(false)
+    private val messages          = mutableStateListOf<ChatMessage>()
+    private val streamingText     = mutableStateOf("")
+    private val selectedPdfPath   = mutableStateOf<String?>(null)
+    private val selectedPdfName   = mutableStateOf<String?>(null)
+    private val currentStatus     = mutableStateOf("")
 
     // JNI callbacks
-    fun streamToken(piece: String)  { runOnUiThread { streamingResponse.value += piece } }
-    fun streamStatus(status: String){ runOnUiThread { nodeStatus.value = status } }
+    fun streamToken(piece: String) {
+        runOnUiThread { streamingText.value += piece }
+    }
+    fun streamStatus(status: String) {
+        runOnUiThread { currentStatus.value = status }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,63 +90,50 @@ class MainActivity : ComponentActivity() {
 
         thread {
             try {
-                addLog("App started")
-                runOnUiThread { loadingStatus.value = "Copying models to storage..." }
+                runOnUiThread { loadingStatus.value = "Copying models..." }
 
-                // ── Generation model ───────────────────────────────────────
                 val genModel = File(filesDir, "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf")
+                if (!genModel.exists()) copyAsset("models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf", genModel)
 
-                if (genModel.exists()) {
-                    addLog("Gen model cached (${genModel.length()/1024/1024} MB)", LogLevel.INFO)
-                } else {
-                    addLog("Copying generation model from assets...", LogLevel.WARNING)
-                    copyAsset("models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf", genModel)
-                }
-
-                // ── Embedding model ────────────────────────────────────────
                 val embModel = File(filesDir, "multilingual-e5-small-Q4_k_m.gguf")
-                if (embModel.exists()) {
-                    addLog("Embedding model cached (${embModel.length()/1024/1024} MB)", LogLevel.INFO)
-                } else {
-                    addLog("Copying E5 embedding model from assets...", LogLevel.WARNING)
-                    copyAsset("models/multilingual-e5-small-Q4_k_m.gguf", embModel)
-                }
+                if (!embModel.exists()) copyAsset("models/multilingual-e5-small-Q4_k_m.gguf", embModel)
 
-                // ── Load both models ───────────────────────────────────────
                 runOnUiThread { loadingStatus.value = "Loading generation model..." }
-                addLog("Loading generation model into RAM...", LogLevel.INFO)
-                val t1 = System.currentTimeMillis()
                 loadModel(genModel.absolutePath)
-                addLog("Generation model loaded in ${(System.currentTimeMillis()-t1)/1000}s ✓", LogLevel.SUCCESS)
 
                 runOnUiThread { loadingStatus.value = "Loading embedding model..." }
-                addLog("Loading embedding model into RAM...", LogLevel.INFO)
-                val t2 = System.currentTimeMillis()
                 loadEmbeddingModel(embModel.absolutePath)
-                addLog("Embedding model loaded in ${(System.currentTimeMillis()-t2)/1000}s ✓", LogLevel.SUCCESS)
 
                 runOnUiThread {
-                    loadingStatus.value = "✓ Ready — select a PDF to begin"
+                    loadingStatus.value = "Ready"
                     isModelReady.value = true
+                    messages.add(ChatMessage(
+                        id = generateUniqueId(),   // ✅ FIX
+                        role = ChatMessage.Role.STATUS,
+                        text = "Models loaded. Attach a PDF and start asking questions."
+                    ))
                 }
-
             } catch (e: Exception) {
-                addLog("FATAL: ${e.message}", LogLevel.ERROR)
-                runOnUiThread { loadingStatus.value = "❌ ${e.message}" }
+                runOnUiThread {
+                    loadingStatus.value = "❌ ${e.message}"
+                    messages.add(ChatMessage(
+                        id = generateUniqueId(),   // ✅ FIX
+                        role = ChatMessage.Role.STATUS,
+                        text = "Failed to load models: ${e.message}"
+                    ))
+                }
             }
         }
 
-        setContent { BT_AgentTheme { ChatScreen() } }
+        setContent { BT_AgentTheme { ChatUI() } }
     }
 
     private fun copyAsset(assetPath: String, dest: File) {
         assets.open(assetPath).use { i ->
             FileOutputStream(dest).use { o -> i.copyTo(o) }
         }
-        addLog("Copied $assetPath (${dest.length()/1024/1024} MB)", LogLevel.SUCCESS)
     }
 
-    // Copy PDF from content URI to app's internal storage so C++ can read it
     private fun copyPdfToInternal(uri: Uri): String {
         val name = getFileNameFromUri(uri) ?: "document.pdf"
         val dest = File(filesDir, "pdfs/$name")
@@ -126,7 +141,6 @@ class MainActivity : ComponentActivity() {
         contentResolver.openInputStream(uri)?.use { i ->
             FileOutputStream(dest).use { o -> i.copyTo(o) }
         }
-        addLog("PDF copied to internal: ${dest.absolutePath}", LogLevel.SUCCESS)
         return dest.absolutePath
     }
 
@@ -141,7 +155,6 @@ class MainActivity : ComponentActivity() {
         return name
     }
 
-    // ── Vector store directory for this PDF ────────────────────────────────
     private fun storeDir(pdfPath: String): String {
         val pdfName = File(pdfPath).nameWithoutExtension
         val dir = File(filesDir, "vector_stores/$pdfName")
@@ -149,24 +162,100 @@ class MainActivity : ComponentActivity() {
         return dir.absolutePath
     }
 
-    // ── UI ─────────────────────────────────────────────────────────────────
+    private fun sendMessage(question: String) {
+        val pdf = selectedPdfPath.value ?: return
+        val store = storeDir(pdf)
+
+        // ✅ USER MESSAGE FIX
+        messages.add(ChatMessage(
+            id = generateUniqueId(),
+            role = ChatMessage.Role.USER,
+            text = question
+        ))
+
+        isGenerating.value = true
+        streamingText.value = ""
+        currentStatus.value = ""
+
+        // ✅ ASSISTANT ID FIX
+        val assistantMsgId = generateUniqueId()
+
+        messages.add(ChatMessage(
+            id = assistantMsgId,
+            role = ChatMessage.Role.ASSISTANT,
+            text = "",
+            isStreaming = true
+        ))
+
+        thread {
+            try {
+                generateText(pdf, store, question)
+                val finalText = streamingText.value
+
+                runOnUiThread {
+                    val idx = messages.indexOfFirst { it.id == assistantMsgId }
+                    if (idx >= 0) {
+                        messages[idx] = ChatMessage(
+                            id = assistantMsgId,
+                            role = ChatMessage.Role.ASSISTANT,
+                            text = finalText.ifEmpty { "[No response]" },
+                            isStreaming = false
+                        )
+                    }
+                    isGenerating.value = false
+                    currentStatus.value = ""
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    val idx = messages.indexOfFirst { it.id == assistantMsgId }
+                    if (idx >= 0) {
+                        messages[idx] = ChatMessage(
+                            id = assistantMsgId,
+                            role = ChatMessage.Role.ASSISTANT,
+                            text = "❌ Error: ${e.message}",
+                            isStreaming = false
+                        )
+                    }
+                    isGenerating.value = false
+                    currentStatus.value = ""
+                }
+            }
+        }
+    }
+
+    // ── Color palette ──────────────────────────────────────────────────────
+    private val BgDark       = Color(0xFF0F1117)
+    private val SurfaceDark  = Color(0xFF1A1D27)
+    private val CardDark     = Color(0xFF21253A)
+    private val AccentBlue   = Color(0xFF4F8EF7)
+    private val AccentPurple = Color(0xFF9B6EF3)
+    private val UserBubble   = Color(0xFF2A3A5C)
+    private val AiBubble     = Color(0xFF1E2235)
+    private val TextPrimary  = Color(0xFFE8ECF4)
+    private val TextSecondary= Color(0xFF8B91A8)
+    private val StatusColor  = Color(0xFF4ECDC4)
+
+    // ── Main UI ────────────────────────────────────────────────────────────
     @Composable
-    fun ChatScreen() {
-        var userInput          by remember { mutableStateOf("") }
-        val modelReady         by isModelReady
-        val status             by loadingStatus
-        val streaming          by streamingResponse
-        val currentNodeStatus  by nodeStatus
-        val pdfName            by selectedPdfName
-        val pdfPath            by selectedPdfPath
+    fun ChatUI() {
+        val modelReady    by isModelReady
+        val loading       by loadingStatus
+        val generating    by isGenerating
+        val streaming     by streamingText
+        val pdfPath       by selectedPdfPath
+        val pdfName       by selectedPdfName
+        val status        by currentStatus
 
-        val logScrollState      = rememberScrollState()
-        val responseScrollState = rememberScrollState()
+        var userInput by remember { mutableStateOf("") }
+        val listState = rememberLazyListState()
 
-        LaunchedEffect(logs.size)  { logScrollState.animateScrollTo(logScrollState.maxValue) }
-        LaunchedEffect(streaming)  { responseScrollState.animateScrollTo(responseScrollState.maxValue) }
+        // Auto-scroll when messages change or streaming updates
+        LaunchedEffect(messages.size, streaming) {
+            if (messages.isNotEmpty()) {
+                listState.animateScrollToItem(messages.size - 1)
+            }
+        }
 
-        // PDF picker launcher
         val pdfLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
@@ -174,203 +263,386 @@ class MainActivity : ComponentActivity() {
                 result.data?.data?.let { uri ->
                     thread {
                         val name = getFileNameFromUri(uri) ?: "document.pdf"
-                        addLog("PDF selected: $name", LogLevel.INFO)
-                        runOnUiThread { selectedPdfName.value = name }
                         val path = copyPdfToInternal(uri)
-                        runOnUiThread { selectedPdfPath.value = path }
-                        addLog("PDF ready at: $path", LogLevel.SUCCESS)
+                        runOnUiThread {
+                            selectedPdfPath.value = path
+                            selectedPdfName.value = name
+                            // Clear old chat when new PDF is loaded
+                            messages.clear()
+                            messages.add(ChatMessage(
+                                id = generateUniqueId(),   // ✅ FIX
+                                role = ChatMessage.Role.STATUS,
+                                text = "📄 PDF loaded: $name\nVector store: ${
+                                    if (File(storeDir(path), "hnsw_index.bin").exists())
+                                        "cached ✓" else "will build on first query"
+                                }"
+                            ))
+                        }
                     }
                 }
             }
         }
 
-        Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
-            Column(
-                modifier = Modifier
-                    .padding(padding)
-                    .padding(16.dp)
-                    .fillMaxSize()
-            ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BgDark)
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
 
-                // ── Status Banner ──────────────────────────────────────────
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (modelReady) Color(0xFF1B5E20)
-                        else MaterialTheme.colorScheme.surfaceVariant
-                    )
+                // ── Top bar ────────────────────────────────────────────────
+                TopBar(
+                    modelReady = modelReady,
+                    loading = loading,
+                    pdfName = pdfName
+                )
+
+                // ── Chat messages ──────────────────────────────────────────
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Column(modifier = Modifier.padding(10.dp)) {
-                        if (!modelReady) {
-                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                            Spacer(Modifier.height(6.dp))
-                        }
-                        Text(
-                            text = status, fontSize = 13.sp,
-                            color = if (modelReady) Color.White
-                            else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-
-                // ── PDF Picker ─────────────────────────────────────────────
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (pdfPath != null) Color(0xFF1A237E)
-                        else MaterialTheme.colorScheme.surfaceVariant
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .padding(10.dp)
-                            .fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "📄 $pdfName",
-                                fontSize = 12.sp,
-                                color = if (pdfPath != null) Color.White
-                                else MaterialTheme.colorScheme.onSurfaceVariant
+                    items(messages, key = { it.id }) { msg ->
+                        when (msg.role) {
+                            ChatMessage.Role.USER      -> UserBubble(msg.text)
+                            ChatMessage.Role.ASSISTANT -> AssistantBubble(
+                                text = if (msg.isStreaming) streaming else msg.text,
+                                isStreaming = msg.isStreaming
                             )
-                            if (pdfPath != null) {
-                                Text(
-                                    text = "Vector store: ${File(storeDir(pdfPath!!), "hnsw_index.bin").exists().let { if (it) "cached ✓" else "will build" }}",
-                                    fontSize = 10.sp,
-                                    color = Color(0xFF90CAF9)
-                                )
-                            }
-                        }
-                        Button(
-                            onClick = {
-                                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                                    addCategory(Intent.CATEGORY_OPENABLE)
-                                    type = "application/pdf"
-                                }
-                                pdfLauncher.launch(intent)
-                            },
-                            enabled = modelReady
-                        ) {
-                            Text("Pick PDF", fontSize = 12.sp)
+                            ChatMessage.Role.STATUS    -> StatusBubble(msg.text)
                         }
                     }
                 }
 
-                Spacer(Modifier.height(10.dp))
-
-                // ── Log Console ────────────────────────────────────────────
-                Text("Logs:", style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(4.dp))
-                Card(
-                    modifier = Modifier.fillMaxWidth().height(130.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A1A))
-                ) {
-                    Column(
-                        modifier = Modifier.padding(8.dp).verticalScroll(logScrollState)
-                    ) {
-                        if (logs.isEmpty()) Text("Waiting...", fontSize = 11.sp, color = Color.Gray)
-                        logs.forEach { (msg, level) ->
-                            val color = when (level) {
-                                LogLevel.SUCCESS -> Color(0xFF66BB6A)
-                                LogLevel.ERROR   -> Color(0xFFEF5350)
-                                LogLevel.WARNING -> Color(0xFFFFCA28)
-                                LogLevel.INFO    -> Color(0xFFB0BEC5)
-                            }
-                            Text(text = msg, fontSize = 11.sp, color = color)
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-
-                // ── Node Status ────────────────────────────────────────────
-                if (currentNodeStatus.isNotEmpty()) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF263238))
-                    ) {
-                        Text(
-                            text = currentNodeStatus,
-                            fontSize = 12.sp,
-                            color = Color(0xFF80CBC4),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                        )
-                    }
-                    Spacer(Modifier.height(6.dp))
-                }
-
-                // ── Response Area ──────────────────────────────────────────
-                Text("Response:", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(4.dp))
-                Card(
-                    modifier = Modifier.fillMaxWidth().weight(1f)
+                // ── Status ticker ──────────────────────────────────────────
+                AnimatedVisibility(
+                    visible = status.isNotEmpty(),
+                    enter = fadeIn() + expandVertically(),
+                    exit  = fadeOut() + shrinkVertically()
                 ) {
                     Box(
                         modifier = Modifier
-                            .padding(10.dp)
-                            .verticalScroll(responseScrollState)
+                            .fillMaxWidth()
+                            .background(Color(0xFF0D1520))
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
                     ) {
                         Text(
-                            text = streaming.ifEmpty { "Response will appear here..." },
-                            fontSize = 14.sp,
-                            color = if (streaming.isEmpty())
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            else MaterialTheme.colorScheme.onSurface
+                            text = status,
+                            fontSize = 11.sp,
+                            color = StatusColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                Spacer(Modifier.height(10.dp))
-
-                // ── Input ──────────────────────────────────────────────────
-                TextField(
+                // ── Input bar ──────────────────────────────────────────────
+                InputBar(
                     value = userInput,
                     onValueChange = { userInput = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Ask something about your PDF...") },
-                    enabled = modelReady && pdfPath != null
-                )
-
-                Spacer(Modifier.height(8.dp))
-
-                Button(
-                    onClick = {
-                        val question = userInput
-                        val pdf      = pdfPath ?: return@Button
-                        val store    = storeDir(pdf)
-
-                        streamingResponse.value = ""
-                        nodeStatus.value        = ""
-
-                        addLog("Query: \"${question.take(50)}\"", LogLevel.INFO)
-                        addLog("PDF:   $pdf",                      LogLevel.INFO)
-                        addLog("Store: $store",                    LogLevel.INFO)
-
-                        thread {
-                            try {
-                                val start = System.currentTimeMillis()
-                                val result = generateText(pdf, store, question)
-                                val elapsed = (System.currentTimeMillis() - start) / 1000
-                                addLog("Done in ${elapsed}s (${result.length} chars)", LogLevel.SUCCESS)
-                            } catch (e: Exception) {
-                                addLog("ERROR: ${e.message}", LogLevel.ERROR)
-                                runOnUiThread {
-                                    streamingResponse.value = "❌ ${e.message}"
-                                }
-                            }
+                    onSend = {
+                        if (userInput.isNotBlank() && pdfPath != null && !generating) {
+                            sendMessage(userInput.trim())
+                            userInput = ""
                         }
                     },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled  = modelReady && pdfPath != null && userInput.isNotBlank()
+                    onAttach = {
+                        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "application/pdf"
+                        }
+                        pdfLauncher.launch(intent)
+                    },
+                    enabled = modelReady && !generating,
+                    sendEnabled = modelReady && pdfPath != null && userInput.isNotBlank() && !generating,
+                    pdfAttached = pdfPath != null,
+                    isGenerating = generating
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun TopBar(modelReady: Boolean, loading: String, pdfName: String?) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(Color(0xFF141829), Color(0xFF1A1D2E))
+                    )
+                )
+                .statusBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column {
+                    Text(
+                        text = "PDF Assistant",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary,
+                        letterSpacing = 0.3.sp
+                    )
+                    Text(
+                        text = if (modelReady) {
+                            pdfName?.let { "📄 $it" } ?: "No PDF selected"
+                        } else loading,
+                        fontSize = 11.sp,
+                        color = if (modelReady && pdfName != null) AccentBlue else TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // Model status dot
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (modelReady) Color(0xFF4CAF50) else Color(0xFFFF9800)
+                        )
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun UserBubble(text: String) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            Box(
+                modifier = Modifier
+                    .widthIn(max = 300.dp)
+                    .clip(RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp))
+                    .background(
+                        Brush.linearGradient(
+                            colors = listOf(AccentBlue, Color(0xFF3A6FD8))
+                        )
+                    )
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+            ) {
+                Text(
+                    text = text,
+                    fontSize = 14.sp,
+                    color = Color.White,
+                    lineHeight = 20.sp
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun AssistantBubble(text: String, isStreaming: Boolean) {
+        // Blinking cursor animation
+        val cursorAlpha by rememberInfiniteTransition(label = "cursor").animateFloat(
+            initialValue = 1f, targetValue = 0f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(500, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "blink"
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Start,
+            verticalAlignment = Alignment.Top
+        ) {
+            // AI avatar
+            Box(
+                modifier = Modifier
+                    .padding(top = 4.dp, end = 8.dp)
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.linearGradient(
+                            colors = listOf(AccentPurple, AccentBlue)
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("AI", fontSize = 9.sp, color = Color.White, fontWeight = FontWeight.Bold)
+            }
+
+            Box(
+                modifier = Modifier
+                    .widthIn(max = 300.dp)
+                    .clip(RoundedCornerShape(4.dp, 18.dp, 18.dp, 18.dp))
+                    .background(AiBubble)
+                    .border(
+                        width = 1.dp,
+                        color = Color(0xFF2A2F45),
+                        shape = RoundedCornerShape(4.dp, 18.dp, 18.dp, 18.dp)
+                    )
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+            ) {
+                if (isStreaming && text.isEmpty()) {
+                    // Loading dots
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        repeat(3) { i ->
+                            val dotAlpha by rememberInfiniteTransition(label = "dot$i").animateFloat(
+                                initialValue = 0.3f, targetValue = 1f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(600, delayMillis = i * 150),
+                                    repeatMode = RepeatMode.Reverse
+                                ),
+                                label = "dotAnim$i"
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(AccentBlue.copy(alpha = dotAlpha))
+                            )
+                        }
+                    }
+                } else {
+                    Text(
+                        text = if (isStreaming) "$text▌" else text,
+                        fontSize = 14.sp,
+                        color = TextPrimary,
+                        lineHeight = 21.sp
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun StatusBubble(text: String) {
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF1A2030))
+                    .border(1.dp, Color(0xFF252A40), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = text,
+                    fontSize = 12.sp,
+                    color = TextSecondary,
+                    lineHeight = 18.sp
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun InputBar(
+        value: String,
+        onValueChange: (String) -> Unit,
+        onSend: () -> Unit,
+        onAttach: () -> Unit,
+        enabled: Boolean,
+        sendEnabled: Boolean,
+        pdfAttached: Boolean,
+        isGenerating: Boolean
+    ) {
+        Surface(
+            color = SurfaceDark,
+            shadowElevation = 8.dp
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Attach PDF button
+                IconButton(
+                    onClick = onAttach,
+                    enabled = enabled,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (pdfAttached) AccentBlue.copy(alpha = 0.2f)
+                            else Color(0xFF252A3A)
+                        )
                 ) {
-                    Text(when {
-                        !modelReady       -> "Loading models..."
-                        pdfPath == null   -> "Select a PDF first"
-                        else              -> "Send"
-                    })
+                    Icon(
+                        imageVector = Icons.Default.AttachFile,
+                        contentDescription = "Attach PDF",
+                        tint = if (pdfAttached) AccentBlue else TextSecondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                // Text field
+                TextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    modifier = Modifier.weight(1f),
+                    placeholder = {
+                        Text(
+                            text = if (!pdfAttached) "Attach a PDF first..." else "Ask about your PDF...",
+                            fontSize = 14.sp,
+                            color = TextSecondary
+                        )
+                    },
+                    enabled = enabled && pdfAttached,
+                    maxLines = 4,
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor   = CardDark,
+                        unfocusedContainerColor = CardDark,
+                        disabledContainerColor  = Color(0xFF16192A),
+                        focusedTextColor        = TextPrimary,
+                        unfocusedTextColor      = TextPrimary,
+                        disabledTextColor       = TextSecondary,
+                        focusedIndicatorColor   = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        disabledIndicatorColor  = Color.Transparent,
+                        cursorColor             = AccentBlue
+                    ),
+                    shape = RoundedCornerShape(16.dp)
+                )
+
+                // Send button
+                IconButton(
+                    onClick = onSend,
+                    enabled = sendEnabled,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (sendEnabled)
+                                Brush.linearGradient(listOf(AccentBlue, AccentPurple))
+                            else
+                                Brush.linearGradient(listOf(Color(0xFF252A3A), Color(0xFF252A3A)))
+                        )
+                ) {
+                    if (isGenerating) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = "Send",
+                            tint = if (sendEnabled) Color.White else TextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
         }

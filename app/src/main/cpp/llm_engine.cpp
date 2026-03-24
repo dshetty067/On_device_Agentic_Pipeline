@@ -21,7 +21,7 @@ static const llama_vocab* g_vocab = nullptr;
 // CONFIG
 // ══════════════════════════════════════════════════════════════════════════════
 
-static constexpr int CTX_SIZE    = 768;
+static constexpr int CTX_SIZE = 2048;
 static constexpr int BATCH_SIZE  = 768;
 static constexpr int UBATCH_SIZE = 768;
 // Max tokens to generate. For short RAG answers, 48 is plenty.

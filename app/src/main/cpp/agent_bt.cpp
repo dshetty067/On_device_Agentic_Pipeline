@@ -7,7 +7,7 @@
 #include <behaviortree_cpp/bt_factory.h>
 #include <android/log.h>
 #include <sstream>
-#include <fstream>    // ← add this line
+#include <fstream>
 
 #define LOG_TAG "BT_AGENT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -35,20 +35,15 @@ public:
             return NodeStatus::FAILURE;
         }
 
-        // Log chunk summary
         std::ostringstream oss;
         oss << "✅ Node 1/5: PDF loaded — "
             << chunks.size() << " chunks extracted";
         LOGI("%s", oss.str().c_str());
         if (statusCb) statusCb(oss.str());
 
-        // Store chunks globally for next node
-        // We reuse vector_store's chunk list via rebuild in EmbedNode
-        // Pass chunks via a static local (simple approach)
         static std::vector<std::string> s_chunks;
         s_chunks = chunks;
 
-        // Log first 3 chunks
         for (int i = 0; i < std::min((int)chunks.size(), 3); i++) {
             LOGI("Chunk[%d]: %.80s...", i, chunks[i].c_str());
             if (statusCb) {
@@ -73,7 +68,7 @@ public:
     static BT::PortsList providedPorts() { return {}; }
 
     NodeStatus tick() override {
-        if (statusCb) statusCb("🟡 Node 2/5: Loading embedding model...");
+        if (statusCb) statusCb("🟡 Node 2/5: Checking vector store...");
         LOGI("EmbedNode: starting");
 
         std::string bin = state.store_dir + "/vector_store.bin";
@@ -87,7 +82,8 @@ public:
             }
         }
 
-        auto chunks = load_and_chunk_pdf(state.pdf_path);
+        // Use chunk_size=600, overlap=100 — matches pdf_processor defaults
+        auto chunks = load_and_chunk_pdf(state.pdf_path, 400, 80);
         if (chunks.empty()) {
             if (statusCb) statusCb("❌ Node 2/5: No chunks to embed");
             return NodeStatus::FAILURE;
@@ -99,9 +95,12 @@ public:
         std::vector<std::vector<float>> embeddings;
         embeddings.reserve(chunks.size());
 
-        for (int i = 0; i < (int)chunks.size(); i++) {
+        // Track which chunks actually got embedded (some may be skipped)
+        std::vector<std::string> embedded_chunks;
+        embedded_chunks.reserve(chunks.size());
 
-            // ✅ E5 requires "passage: "
+        for (int i = 0; i < (int)chunks.size(); i++) {
+            // ✅ E5 requires "passage: " prefix for document chunks
             std::string input = "passage: " + chunks[i];
 
             auto emb = embed_text(input);
@@ -111,6 +110,7 @@ public:
             }
 
             embeddings.push_back(emb);
+            embedded_chunks.push_back(chunks[i]);  // store original (no prefix)
 
             if (i % 5 == 0 || i == (int)chunks.size()-1) {
                 std::string msg = "🔢 Embedded " + std::to_string(i+1) +
@@ -120,7 +120,8 @@ public:
             }
         }
 
-        vector_store_build(embeddings, chunks);
+        // ✅ Pass embedded_chunks (parallel to embeddings) to build
+        vector_store_build(embeddings, embedded_chunks);
         vector_store_save(state.store_dir);
 
         if (statusCb) statusCb("✅ Node 2/5: Embeddings saved to storage");
@@ -163,20 +164,22 @@ public:
         if (statusCb) statusCb("🟡 Node 4/5: Searching vector DB...");
         LOGI("VectorSearchNode: embedding query");
 
-        auto query_emb = embed_text(state.query);
+        // ✅ E5 requires "query: " prefix for search queries
+        std::string query_input = "query: " + state.query;
+        auto query_emb = embed_text(query_input);
         if (query_emb.empty()) {
             if (statusCb) statusCb("❌ Node 4/5: Query embedding failed");
             return NodeStatus::FAILURE;
         }
 
-        auto results = vector_store_search(query_emb, 3);
+        // Retrieve top-5 for better coverage, then feed all to LLM
+        auto results = vector_store_search(query_emb, 5);
         if (results.empty()) {
             if (statusCb) statusCb("⚠️ Node 4/5: No results found");
             state.retrieved_context = "";
             return NodeStatus::SUCCESS;
         }
 
-        // Build context string + show on screen
         std::ostringstream ctx;
         for (int i = 0; i < (int)results.size(); i++) {
             std::string msg = "📌 Retrieved [" + std::to_string(i+1) +
@@ -196,7 +199,6 @@ private:
     std::function<void(const std::string&)> statusCb;
 };
 
-// ── Node 5: LLM generation with RAG context ────────────────────────────────
 // ── Node 5: LLM generation with RAG context ────────────────────────────────
 class LLMNode : public SyncActionNode {
 public:
@@ -220,41 +222,45 @@ public:
 
         if (statusCallback) statusCallback("🟡 LLM generating...");
 
-        // ── Limits ────────────────────────────────────────────────────────
-        // MAX_CONTEXT_CHARS: how many chars of retrieved context to feed in.
-        // Smaller = faster prefill. 300 is ~75 tokens for Qwen tokenizer.
-        static constexpr size_t MAX_CONTEXT_CHARS  = 300;
-        static constexpr size_t MAX_QUESTION_CHARS = 80;
+        // ✅ Increased context chars — CTX_SIZE is now 768, so we can afford more
+        // ~500 chars ≈ 125 tokens, leaving plenty of room for 256 generation tokens
+        static constexpr size_t MAX_CONTEXT_CHARS  = 2000;
+        static constexpr size_t MAX_QUESTION_CHARS = 150;
 
         std::string context  = state.retrieved_context;
         std::string question = state.query;
 
-        // Trim context at a word boundary.
+        // Trim context at a sentence boundary if possible
         if (context.size() > MAX_CONTEXT_CHARS) {
             context = context.substr(0, MAX_CONTEXT_CHARS);
-            size_t last_space = context.find_last_of(" \n");
-            if (last_space != std::string::npos && last_space > MAX_CONTEXT_CHARS / 2)
-                context = context.substr(0, last_space);
+            // Try to cut at last sentence end
+            size_t last_dot = context.find_last_of(".!?");
+            if (last_dot != std::string::npos && last_dot > MAX_CONTEXT_CHARS / 2)
+                context = context.substr(0, last_dot + 1);
         }
         if (question.size() > MAX_QUESTION_CHARS)
             question = question.substr(0, MAX_QUESTION_CHARS);
 
-        // ── Qwen2.5 ChatML prompt ─────────────────────────────────────────
-        // Kept intentionally compact: short system prompt = fewer tokens to prefill.
+        // ✅ Better system prompt: instructs the model to answer fully
         const std::string prompt =
                 "<|im_start|>system\n"
-                "Answer briefly using the context.\n"
+                "You are a strict question-answering assistant.\n"
+                "Answer ONLY using the provided context.\n"
+                "Do NOT use outside knowledge.\n"
+                "If the answer is not in the context, say: \"Not found in document.\"\n"
                 "<|im_end|>\n"
-                "<|im_start|>user\n"
-                "Context: " + context + "\n"
-                                        "Q: " + question + "\n"
-                                                           "<|im_end|>\n"
-                                                           "<|im_start|>assistant\n";
 
-        // ── Delegate to llm_engine ────────────────────────────────────────
-        // generate() handles tokenization, prefill, decode, and cleanup.
-        // Keeping all of that logic in one place avoids duplicating the
-        // sampler-chain setup and KV-clear that was previously here.
+                "<|im_start|>user\n"
+                "CONTEXT:\n"
+                "---------------------\n" +
+                context +
+                "---------------------\n\n"
+
+                "QUESTION:\n" + question + "\n"
+                                           "<|im_end|>\n"
+
+                                           "<|im_start|>assistant\n";
+
         const std::string result = generate(prompt, tokenCallback);
 
         if (result.empty() || result[0] == '[') {
