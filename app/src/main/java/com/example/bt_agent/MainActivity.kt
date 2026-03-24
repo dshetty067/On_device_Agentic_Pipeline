@@ -34,6 +34,7 @@ class MainActivity : ComponentActivity() {
     external fun loadEmbeddingModel(path: String)
     external fun generateText(pdfPath: String, storeDir: String, prompt: String): String
 
+
     // ── State ──────────────────────────────────────────────────────────────
     private val isModelReady       = mutableStateOf(false)
     private val loadingStatus      = mutableStateOf("Starting up...")
@@ -65,21 +66,22 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread { loadingStatus.value = "Copying models to storage..." }
 
                 // ── Generation model ───────────────────────────────────────
-                val genModel = File(filesDir, "gemma-3-1b-it-Q4_K_M.gguf")
+                val genModel = File(filesDir, "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf")
+
                 if (genModel.exists()) {
                     addLog("Gen model cached (${genModel.length()/1024/1024} MB)", LogLevel.INFO)
                 } else {
                     addLog("Copying generation model from assets...", LogLevel.WARNING)
-                    copyAsset("models/gemma-3-1b-it-Q4_K_M.gguf", genModel)
+                    copyAsset("models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf", genModel)
                 }
 
                 // ── Embedding model ────────────────────────────────────────
-                val embModel = File(filesDir, "embeddinggemma-300M-qat-Q4_0.gguf")
+                val embModel = File(filesDir, "multilingual-e5-small-Q4_k_m.gguf")
                 if (embModel.exists()) {
                     addLog("Embedding model cached (${embModel.length()/1024/1024} MB)", LogLevel.INFO)
                 } else {
-                    addLog("Copying embedding model from assets...", LogLevel.WARNING)
-                    copyAsset("models/embeddinggemma-300M-qat-Q4_0.gguf", embModel)
+                    addLog("Copying E5 embedding model from assets...", LogLevel.WARNING)
+                    copyAsset("models/multilingual-e5-small-Q4_k_m.gguf", embModel)
                 }
 
                 // ── Load both models ───────────────────────────────────────

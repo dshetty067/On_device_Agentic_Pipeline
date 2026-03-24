@@ -2,6 +2,7 @@
 #include <android/log.h>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 #define LOG_TAG "EmbeddingEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -17,7 +18,7 @@ void load_embedding_model(const std::string& path)
     LOGI("load_embedding_model: %s", path.c_str());
 
     llama_model_params mparams = llama_model_default_params();
-    mparams.n_gpu_layers = 0; // CPU only on Android
+    mparams.n_gpu_layers = 0;
 
     emb_model = llama_model_load_from_file(path.c_str(), mparams);
     if (!emb_model) {
@@ -26,11 +27,12 @@ void load_embedding_model(const std::string& path)
     }
 
     llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx        = 512;
-    cparams.n_batch      = 512;
-    cparams.n_threads    = 4;
-    cparams.embeddings   = true;   // ← key flag for embedding mode
-    cparams.pooling_type = LLAMA_POOLING_TYPE_MEAN; // mean pooling
+
+    cparams.n_ctx        = 256;
+    cparams.n_batch      = 128;
+    cparams.n_threads    = std::thread::hardware_concurrency();
+    cparams.embeddings   = true;
+    cparams.pooling_type = LLAMA_POOLING_TYPE_MEAN;
 
     emb_ctx = llama_init_from_model(emb_model, cparams);
     if (!emb_ctx) {
@@ -61,31 +63,38 @@ std::vector<float> embed_text(const std::string& text)
         return {};
     }
 
-    // Tokenize
-    std::vector<llama_token> tokens(text.size() + 64);
+    // ✅ OPTIONAL: truncate for speed (E5 works best with short text)
+    std::string input = text;
+    if (input.size() > 300) {
+        input = input.substr(0, 300);
+    }
+
+    // 2-pass tokenize
     int n = llama_tokenize(
             emb_vocab,
-            text.c_str(), (int)text.size(),
-            tokens.data(), (int)tokens.size(),
+            input.c_str(), (int)input.size(),
+            nullptr, 0,
             true, false
     );
-    if (n < 0) {
-        LOGE("embed_text: tokenize failed");
-        return {};
-    }
-    tokens.resize(n);
+    if (n < 0) n = -n;
 
-    // Clear KV cache
+    std::vector<llama_token> tokens(n);
+
+    llama_tokenize(
+            emb_vocab,
+            input.c_str(), (int)input.size(),
+            tokens.data(), n,
+            true, false
+    );
+
     llama_memory_clear(llama_get_memory(emb_ctx), true);
 
-    // Run forward pass
     llama_batch batch = llama_batch_get_one(tokens.data(), n);
     if (llama_decode(emb_ctx, batch) != 0) {
         LOGE("embed_text: decode failed");
         return {};
     }
 
-    // Get embeddings from last token (mean pooling handled by context)
     const float* raw = llama_get_embeddings(emb_ctx);
     if (!raw) {
         LOGE("embed_text: null embeddings");
@@ -94,7 +103,6 @@ std::vector<float> embed_text(const std::string& text)
 
     std::vector<float> emb(raw, raw + emb_dim);
 
-    // L2 normalize
     float norm = 0.0f;
     for (float v : emb) norm += v * v;
     norm = std::sqrt(norm);

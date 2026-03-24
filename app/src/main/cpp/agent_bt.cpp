@@ -76,7 +76,6 @@ public:
         if (statusCb) statusCb("🟡 Node 2/5: Loading embedding model...");
         LOGI("EmbedNode: starting");
 
-        // Check if vector store already saved for this PDF
         std::string bin = state.store_dir + "/vector_store.bin";
         std::ifstream check(bin);
         if (check.good()) {
@@ -88,7 +87,6 @@ public:
             }
         }
 
-        // Re-chunk (chunks were extracted in PDFLoaderNode)
         auto chunks = load_and_chunk_pdf(state.pdf_path);
         if (chunks.empty()) {
             if (statusCb) statusCb("❌ Node 2/5: No chunks to embed");
@@ -102,11 +100,16 @@ public:
         embeddings.reserve(chunks.size());
 
         for (int i = 0; i < (int)chunks.size(); i++) {
-            auto emb = embed_text(chunks[i]);
+
+            // ✅ E5 requires "passage: "
+            std::string input = "passage: " + chunks[i];
+
+            auto emb = embed_text(input);
             if (emb.empty()) {
                 LOGI("EmbedNode: skipping empty embedding at %d", i);
                 continue;
             }
+
             embeddings.push_back(emb);
 
             if (i % 5 == 0 || i == (int)chunks.size()-1) {
@@ -123,6 +126,7 @@ public:
         if (statusCb) statusCb("✅ Node 2/5: Embeddings saved to storage");
         return NodeStatus::SUCCESS;
     }
+
 private:
     std::function<void(const std::string&)> statusCb;
 };
@@ -193,6 +197,7 @@ private:
 };
 
 // ── Node 5: LLM generation with RAG context ────────────────────────────────
+// ── Node 5: LLM generation with RAG context ────────────────────────────────
 class LLMNode : public SyncActionNode {
 public:
     LLMNode(const std::string& name, const NodeConfig& config,
@@ -203,25 +208,67 @@ public:
 
     static BT::PortsList providedPorts() { return {}; }
 
-    NodeStatus tick() override {
-        if (statusCallback) statusCallback("🟡 Node 5/5: LLM generating...");
-        LOGI("LLMNode: building RAG prompt");
+    NodeStatus tick() override
+    {
+        const llama_vocab* vocab = get_vocab();
+        llama_context*     ctx   = get_ctx();
 
-        // Build RAG prompt
-        std::string rag_prompt =
-                "You are a helpful assistant. Use the following context to answer "
-                "the user's question.\n\n"
-                "Context:\n" + state.retrieved_context +
-                "\nQuestion: " + state.query +
-                "\nAnswer:";
+        if (!vocab || !ctx) {
+            if (statusCallback) statusCallback("❌ Model not loaded");
+            return NodeStatus::FAILURE;
+        }
 
-        LOGI("RAG prompt length: %zu", rag_prompt.size());
+        if (statusCallback) statusCallback("🟡 LLM generating...");
 
-        state.response = generate(rag_prompt, tokenCallback);
+        // ── Limits ────────────────────────────────────────────────────────
+        // MAX_CONTEXT_CHARS: how many chars of retrieved context to feed in.
+        // Smaller = faster prefill. 300 is ~75 tokens for Qwen tokenizer.
+        static constexpr size_t MAX_CONTEXT_CHARS  = 300;
+        static constexpr size_t MAX_QUESTION_CHARS = 80;
 
-        if (statusCallback) statusCallback("✅ Node 5/5: Done");
+        std::string context  = state.retrieved_context;
+        std::string question = state.query;
+
+        // Trim context at a word boundary.
+        if (context.size() > MAX_CONTEXT_CHARS) {
+            context = context.substr(0, MAX_CONTEXT_CHARS);
+            size_t last_space = context.find_last_of(" \n");
+            if (last_space != std::string::npos && last_space > MAX_CONTEXT_CHARS / 2)
+                context = context.substr(0, last_space);
+        }
+        if (question.size() > MAX_QUESTION_CHARS)
+            question = question.substr(0, MAX_QUESTION_CHARS);
+
+        // ── Qwen2.5 ChatML prompt ─────────────────────────────────────────
+        // Kept intentionally compact: short system prompt = fewer tokens to prefill.
+        const std::string prompt =
+                "<|im_start|>system\n"
+                "Answer briefly using the context.\n"
+                "<|im_end|>\n"
+                "<|im_start|>user\n"
+                "Context: " + context + "\n"
+                                        "Q: " + question + "\n"
+                                                           "<|im_end|>\n"
+                                                           "<|im_start|>assistant\n";
+
+        // ── Delegate to llm_engine ────────────────────────────────────────
+        // generate() handles tokenization, prefill, decode, and cleanup.
+        // Keeping all of that logic in one place avoids duplicating the
+        // sampler-chain setup and KV-clear that was previously here.
+        const std::string result = generate(prompt, tokenCallback);
+
+        if (result.empty() || result[0] == '[') {
+            if (statusCallback) statusCallback("❌ LLM failed — " + result);
+            return NodeStatus::FAILURE;
+        }
+
+        state.response = result;
+
+        std::string preview = result.substr(0, std::min((size_t)80, result.size()));
+        if (statusCallback) statusCallback("✅ Done — " + preview);
         return NodeStatus::SUCCESS;
     }
+
 private:
     std::function<void(const std::string&)> tokenCallback;
     std::function<void(const std::string&)> statusCallback;
