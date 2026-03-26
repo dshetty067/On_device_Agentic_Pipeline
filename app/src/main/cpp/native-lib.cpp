@@ -26,6 +26,16 @@ Java_com_example_bt_1agent_MainActivity_loadEmbeddingModel(
     env->ReleaseStringUTFChars(path, p);
 }
 
+// ── Init tool registry ─────────────────────────────────────────────────────
+// Must be called AFTER both models are loaded.
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_bt_1agent_MainActivity_initToolRegistry(
+        JNIEnv* /*env*/, jobject /*thiz*/)
+{
+    init_tool_registry();
+}
+
 // ── Run RAG agent ──────────────────────────────────────────────────────────
 extern "C"
 JNIEXPORT jstring JNICALL
@@ -56,15 +66,19 @@ Java_com_example_bt_1agent_MainActivity_generateText(
         finalResult += piece;
     };
 
-    auto onStatus = [jvm, globalThiz, statusMethod](const std::string& status) {
+    auto onStatus = [jvm, globalThiz, statusMethod](const std::string& s) {
         JNIEnv* e = nullptr;
         jvm->AttachCurrentThread(&e, nullptr);
-        jstring js = e->NewStringUTF(status.c_str());
+        jstring js = e->NewStringUTF(s.c_str());
         e->CallVoidMethod(globalThiz, statusMethod, js);
         e->DeleteLocalRef(js);
     };
 
     run_agent(pdf, store, text, onToken, onStatus);
+
+    // Return the final validated answer from the blackboard
+    const std::string& answer = get_blackboard().final_answer;
+    finalResult = answer.empty() ? finalResult : answer;
 
     env->ReleaseStringUTFChars(pdfPath,  pdf);
     env->ReleaseStringUTFChars(storeDir, store);

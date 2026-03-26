@@ -110,6 +110,7 @@ add_library(
         pdf_processor.cpp
         vector_store.cpp
         agent_bt.cpp
+        tool_registry.cpp   # ← this is the only addition
 )
 
 # Apply optimization flags — armv8.2-a+dotprod+fp16 matches device exactly
