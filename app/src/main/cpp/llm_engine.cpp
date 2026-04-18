@@ -132,13 +132,14 @@ void load_model(const std::string& path) {
 
 std::string classify_intent(const std::string& query) {
     std::string prompt =
-
-            "If a tool is needed: {\" \"<|im_start|>system\\n\"\n"
-            "            \"You are an intent classifier. Respond ONLY with valid JSON, no extra text.For the given user qury which tool is best suitable that you should identify\\n\"\n"
-            "            \"Available tools:\\n\"\n"
-            "            \"- web_search: get current weather of any place and current news and affairs\\n\"\n"
-            "            \"- rag: answer questions related to stock market performance in 2024\\n\"\n"
-            "            \"- book_flight: book a flight ticket\\n\"action\":\"use_tool\",\"tool\":\"<name>\"}\n"
+            "<|im_start|>system\n"
+            "You are an intent classifier. Respond ONLY with valid JSON, no extra text.\n"
+            "Available tools:\n"
+            "- weather: get current weather for any city\n"
+            "- web_search: search the internet for current news, facts, current events\n"
+            "- rag: answer questions related to stock market performance in 2024\n"
+            "- book_flight: book a flight ticket\n"
+            "If a tool is needed: {\"action\":\"use_tool\",\"tool\":\"<name>\"}\n"
             "If no tool needed: {\"action\":\"general_answer\"}\n"
             "<|im_end|>\n"
             "<|im_start|>user\n" + query + "\n<|im_end|>\n"

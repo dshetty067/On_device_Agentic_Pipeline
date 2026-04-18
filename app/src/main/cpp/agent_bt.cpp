@@ -149,11 +149,14 @@ public:
         const std::string& tool = g_bb.selected_tool;
         logStatus("🔧 [2/3] Executing tool: " + tool);
 
-        if (tool == "web_search") {
-            NodeStatus s = executeWebSearch();
+        if (tool == "weather") {                  // ← renamed from web_search
+            NodeStatus s = executeWeather();
             if (s != NodeStatus::SUCCESS) return s;
 
-        } else if (tool == "rag") {
+        } else if (tool == "web_search") {        // ← new real web search
+            NodeStatus s = executeWebSearch();
+            if (s != NodeStatus::SUCCESS) return s;
+        }else if (tool == "rag") {
             NodeStatus s = executeRag();
             if (s != NodeStatus::SUCCESS) return s;
 
@@ -171,7 +174,67 @@ public:
         return NodeStatus::SUCCESS;
     }
 
-    // 🔥 NEW JNI WEB SEARCH
+    // WEATHER TOOL
+    NodeStatus executeWeather() {
+        logStatus("🟡 [2/3] Weather fetch via Kotlin...");
+
+        if (!g_jvm || !g_activity) {
+            g_bb.tool_result    = "Weather is not available (JNI not initialized).";
+            g_bb.tool_succeeded = false;
+            return NodeStatus::FAILURE;
+        }
+
+        JNIEnv* env = nullptr;
+        g_jvm->AttachCurrentThread(&env, nullptr);
+
+        jclass cls = env->GetObjectClass(g_activity);
+        jmethodID method = env->GetMethodID(
+                cls, "fetchWeather",                          // ← renamed
+                "(Ljava/lang/String;)Ljava/lang/String;");
+
+        if (!method) {
+            g_bb.tool_result    = "fetchWeather method not found.";
+            g_bb.tool_succeeded = false;
+            return NodeStatus::FAILURE;
+        }
+
+        jstring jquery  = env->NewStringUTF(g_bb.user_query.c_str());
+        jstring jresult = (jstring)env->CallObjectMethod(g_activity, method, jquery);
+        env->DeleteLocalRef(jquery);
+
+        if (!jresult) {
+            g_bb.tool_result    = "Weather fetch returned null.";
+            g_bb.tool_succeeded = false;
+            return NodeStatus::FAILURE;
+        }
+
+        const char* res = env->GetStringUTFChars(jresult, nullptr);
+        std::string result(res);
+        env->ReleaseStringUTFChars(jresult, res);
+        env->DeleteLocalRef(jresult);
+
+        static const std::vector<std::string> failure_markers = {
+                "No search results found", "Search error:", "Web search error:",
+                "Could not extract city", "City not found", "Geocoding failed",
+                "Weather fetch failed"
+        };
+        for (const auto& marker : failure_markers) {
+            if (result.find(marker) != std::string::npos) {
+                g_bb.tool_result    = result;
+                g_bb.tool_succeeded = false;
+                logStatus("⚠️ [2/3] Weather fetch returned no useful data");
+                return NodeStatus::FAILURE;
+            }
+        }
+
+        g_bb.tool_result    = result;
+        g_bb.tool_succeeded = true;
+        logStatus("✅ [2/3] Weather result received (" +
+                  std::to_string(result.size()) + " chars)");
+        return NodeStatus::SUCCESS;
+    }
+
+// WEB SEARCH TOOL
     NodeStatus executeWebSearch() {
         logStatus("🟡 [2/3] Web search via Kotlin...");
 
@@ -186,7 +249,8 @@ public:
 
         jclass cls = env->GetObjectClass(g_activity);
         jmethodID method = env->GetMethodID(
-                cls, "fetchWebSearch", "(Ljava/lang/String;)Ljava/lang/String;");
+                cls, "fetchWebSearch",                        // ← new Kotlin func
+                "(Ljava/lang/String;)Ljava/lang/String;");
 
         if (!method) {
             g_bb.tool_result    = "fetchWebSearch method not found.";
@@ -209,24 +273,21 @@ public:
         env->ReleaseStringUTFChars(jresult, res);
         env->DeleteLocalRef(jresult);
 
-        // ── NEW: treat "no results" as a soft failure ─────────────────────────
         static const std::vector<std::string> failure_markers = {
-                "No search results found",
-                "Search error:",
-                "Web search error:"
+                "No search results found", "Web search error:", "Search error:"
         };
         for (const auto& marker : failure_markers) {
             if (result.find(marker) != std::string::npos) {
-                g_bb.tool_result    = result; // keep the message
+                g_bb.tool_result    = result;
                 g_bb.tool_succeeded = false;
                 logStatus("⚠️ [2/3] Web search returned no useful data");
-                return NodeStatus::FAILURE; // fall through to GeneralAnswer
+                return NodeStatus::FAILURE;
             }
         }
 
         g_bb.tool_result    = result;
         g_bb.tool_succeeded = true;
-        logStatus("✅ [2/3] Web result received (" +
+        logStatus("✅ [2/3] Web search result received (" +
                   std::to_string(result.size()) + " chars)");
         return NodeStatus::SUCCESS;
     }

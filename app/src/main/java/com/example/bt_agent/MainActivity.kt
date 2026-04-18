@@ -84,17 +84,18 @@ class MainActivity : ComponentActivity() {
         runOnUiThread { currentStatus.value = status }
     }
 
-    fun fetchWebSearch(query: String): String {
-        android.util.Log.e("WEB_SEARCH", "fetchWebSearch CALLED query=$query thread=${Thread.currentThread().name}")
+    // FETCH WEATHER TOOL
+    fun fetchWeather(query: String): String {
+        android.util.Log.e("WEATHER", "fetchWeather CALLED query=$query thread=${Thread.currentThread().name}")
 
         var result = "No result found"
         val latch = java.util.concurrent.CountDownLatch(1)
 
         kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             result = try {
-                doFetchWebSearch(query)
+                doFetchWeather(query)
             } catch (e: Exception) {
-                android.util.Log.e("WEB_SEARCH", "Coroutine exception: ${e.javaClass.name}: ${e.message}", e)
+                android.util.Log.e("WEATHER", "Coroutine exception: ${e.javaClass.name}: ${e.message}", e)
                 "Error: ${e.message}"
             } finally {
                 latch.countDown()
@@ -102,30 +103,29 @@ class MainActivity : ComponentActivity() {
         }
 
         val completed = latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
-        if (!completed) android.util.Log.e("WEB_SEARCH", "TIMED OUT after 15s")
-        android.util.Log.e("WEB_SEARCH", "fetchWebSearch RETURNING: $result")
+        if (!completed) android.util.Log.e("WEATHER", "TIMED OUT after 15s")
+        android.util.Log.e("WEATHER", "fetchWeather RETURNING: $result")
         return result
     }
 
-    private fun doFetchWebSearch(query: String): String {
+    private fun doFetchWeather(query: String): String {
         val client = okhttp3.OkHttpClient.Builder()
             .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
             .build()
 
-        // Step 1: city name → lat/lon via Open-Meteo geocoding
         val q = query.lowercase()
-        val cityGuess = extractCity(q) ?: "Bengaluru"
-        android.util.Log.d("WEB_SEARCH", "Extracted city: $cityGuess")
+        val cityGuess = extractCity(q) ?: return "Could not extract city from query."
+        android.util.Log.d("WEATHER", "Extracted city: $cityGuess")
 
         val geoUrl = "https://geocoding-api.open-meteo.com/v1/search" +
                 "?name=${java.net.URLEncoder.encode(cityGuess, "UTF-8")}&count=1&format=json"
-        android.util.Log.d("WEB_SEARCH", "Geo URL: $geoUrl")
+        android.util.Log.d("WEATHER", "Geo URL: $geoUrl")
 
         val geoBody = client.newCall(
             okhttp3.Request.Builder().url(geoUrl).build()
         ).execute().use { it.body?.string() ?: "" }
-        android.util.Log.d("WEB_SEARCH", "Geo raw: $geoBody")
+        android.util.Log.d("WEATHER", "Geo raw: $geoBody")
 
         if (!geoBody.trim().startsWith("{")) return "Geocoding failed"
 
@@ -135,19 +135,16 @@ class MainActivity : ComponentActivity() {
         val lat      = first.getDouble("latitude")
         val lon      = first.getDouble("longitude")
         val cityName = first.optString("name")
-        android.util.Log.d("WEB_SEARCH", "City: $cityName, lat: $lat, lon: $lon")
+        android.util.Log.d("WEATHER", "City: $cityName, lat: $lat, lon: $lon")
 
-        // Step 2: lat/lon → weather
         val weatherUrl = "https://api.open-meteo.com/v1/forecast" +
                 "?latitude=$lat&longitude=$lon" +
                 "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weathercode,apparent_temperature" +
                 "&timezone=auto"
-        android.util.Log.d("WEB_SEARCH", "Weather URL: $weatherUrl")
 
         val wBody = client.newCall(
             okhttp3.Request.Builder().url(weatherUrl).build()
         ).execute().use { it.body?.string() ?: "" }
-        android.util.Log.d("WEB_SEARCH", "Weather raw: $wBody")
 
         if (!wBody.trim().startsWith("{")) return "Weather fetch failed"
 
@@ -189,6 +186,93 @@ class MainActivity : ComponentActivity() {
         return null
     }
 
+    // WEB SEARCH TOOL - duckduckgo
+    fun fetchWebSearch(query: String): String {
+        android.util.Log.e("WEB_SEARCH", "fetchWebSearch CALLED query=$query")
+
+        var result = "No result found"
+        val latch = java.util.concurrent.CountDownLatch(1)
+
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            result = try {
+                doFetchWebSearch(query)
+            } catch (e: Exception) {
+                android.util.Log.e("WEB_SEARCH", "Exception: ${e.javaClass.name}: ${e.message}", e)
+                "Web search error: ${e.message}"
+            } finally {
+                latch.countDown()
+            }
+        }
+
+        val completed = latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+        if (!completed) android.util.Log.e("WEB_SEARCH", "TIMED OUT after 15s")
+        android.util.Log.e("WEB_SEARCH", "fetchWebSearch RETURNING: $result")
+        return result
+    }
+
+    private fun doFetchWebSearch(query: String): String {
+        val client = okhttp3.OkHttpClient.Builder()
+            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            // DuckDuckGo requires a realistic User-Agent or it returns a CAPTCHA page
+            .build()
+
+        val encodedQuery = java.net.URLEncoder.encode(query, "UTF-8")
+        // DuckDuckGo HTML endpoint — completely free, no API key
+        val url = "https://html.duckduckgo.com/html/?q=$encodedQuery"
+        android.util.Log.d("WEB_SEARCH", "DDG URL: $url")
+
+        val request = okhttp3.Request.Builder()
+            .url(url)
+            .header("User-Agent",
+                "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
+                        "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .build()
+
+        val html = client.newCall(request).execute().use { it.body?.string() ?: "" }
+        android.util.Log.d("WEB_SEARCH", "DDG response length: ${html.length}")
+
+        if (html.isBlank()) return "No search results found"
+
+        // ── Parse result snippets from DDG HTML ──────────────────────────────
+        // DDG wraps each result in <div class="result__body"> with:
+        //   <a class="result__a">TITLE</a>
+        //   <a class="result__snippet">SNIPPET</a>
+        val results = mutableListOf<String>()
+
+        // Regex to extract title + snippet pairs
+        val titleRegex  = Regex("""class="result__a"[^>]*>\s*(.*?)\s*</a>""", RegexOption.DOT_MATCHES_ALL)
+        val snippetRegex = Regex("""class="result__snippet"[^>]*>\s*(.*?)\s*</a>""", RegexOption.DOT_MATCHES_ALL)
+
+        val titles   = titleRegex.findAll(html).map  { it.groupValues[1].cleanHtml() }.toList()
+        val snippets = snippetRegex.findAll(html).map { it.groupValues[1].cleanHtml() }.toList()
+
+        val count = minOf(titles.size, snippets.size, 3) // top 3 results
+        if (count == 0) return "No search results found"
+
+        val sb = StringBuilder("Web search results for \"$query\":\n\n")
+        for (i in 0 until count) {
+            sb.append("${i + 1}. ${titles[i]}\n")
+            sb.append("   ${snippets[i]}\n\n")
+        }
+
+        android.util.Log.d("WEB_SEARCH", "Parsed $count results")
+        return sb.toString().trim()
+    }
+
+    // Strip HTML tags and decode common entities
+    private fun String.cleanHtml(): String =
+        this.replace(Regex("<[^>]+>"), "")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#x27;", "'")
+            .replace("&nbsp;", " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -227,7 +311,7 @@ class MainActivity : ComponentActivity() {
                     messages.add(ChatMessage(
                         id   = nextId(),
                         role = ChatMessage.Role.STATUS,
-                        text = "✅ Ready — tools: web_search · rag · book_flight"
+                        text = "✅ Ready | Tools Available : Weather · Web Search· RAG · Book Flight"
                     ))
                 }
             } catch (e: Exception) {
@@ -455,7 +539,7 @@ class MainActivity : ComponentActivity() {
             ) {
                 Column {
                     Text(
-                        "BT Agent",
+                        "On-Device Agent",
                         fontSize     = 17.sp,
                         fontWeight   = FontWeight.Bold,
                         color        = TextPrimary,
@@ -465,7 +549,7 @@ class MainActivity : ComponentActivity() {
                     Text(
                         text     = when {
                             pdfName != null -> "📄 $pdfName"
-                            modelReady      -> "3 tools active"
+                            modelReady      -> "4 Tools available"
                             else            -> loading
                         },
                         fontSize = 11.sp,
@@ -485,7 +569,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     if (modelReady) {
                         Text(
-                            "weather · rag · flight",
+                            "Weather · Web Search · Rag · Book Flight",
                             fontSize = 9.sp,
                             color    = AccentGreen,
                             modifier = Modifier
@@ -536,7 +620,7 @@ class MainActivity : ComponentActivity() {
                     .background(Brush.linearGradient(listOf(AccentPurple, AccentBlue))),
                 contentAlignment = Alignment.Center
             ) {
-                Text("BT", fontSize = 8.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                Text("AI", fontSize = 8.sp, color = Color.White, fontWeight = FontWeight.Bold)
             }
             Box(
                 modifier = Modifier
