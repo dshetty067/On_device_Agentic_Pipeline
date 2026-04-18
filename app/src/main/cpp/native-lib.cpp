@@ -4,86 +4,88 @@
 #include "embedding_engine.h"
 #include "agent_bt.h"
 
-// ── Load generation model ──────────────────────────────────────────────────
+// 🔥 declare setter
+extern void agent_set_jni(JavaVM* jvm, jobject activity);
+
+// ── Load generation model ────────────────────────────────
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_example_bt_1agent_MainActivity_loadModel(
-        JNIEnv* env, jobject /*thiz*/, jstring path)
+        JNIEnv* env, jobject, jstring path)
 {
     const char* p = env->GetStringUTFChars(path, nullptr);
     load_model(p);
     env->ReleaseStringUTFChars(path, p);
 }
 
-// ── Load embedding model ───────────────────────────────────────────────────
+// ── Load embedding model ─────────────────────────────────
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_example_bt_1agent_MainActivity_loadEmbeddingModel(
-        JNIEnv* env, jobject /*thiz*/, jstring path)
+        JNIEnv* env, jobject, jstring path)
 {
     const char* p = env->GetStringUTFChars(path, nullptr);
     load_embedding_model(p);
     env->ReleaseStringUTFChars(path, p);
 }
 
-// ── Init tool registry ─────────────────────────────────────────────────────
-// Must be called AFTER both models are loaded.
+// ── Set PDF ──────────────────────────────────────────────
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_example_bt_1agent_MainActivity_initToolRegistry(
-        JNIEnv* /*env*/, jobject /*thiz*/)
+Java_com_example_bt_1agent_MainActivity_setPdfPath(
+        JNIEnv* env, jobject,
+        jstring pdf_path, jstring index_dir)
 {
-    init_tool_registry();
+    const char* pp = env->GetStringUTFChars(pdf_path,  nullptr);
+    const char* id = env->GetStringUTFChars(index_dir, nullptr);
+
+    agent_set_pdf_path(pp);
+    agent_set_index_dir(id);
+
+    env->ReleaseStringUTFChars(pdf_path,  pp);
+    env->ReleaseStringUTFChars(index_dir, id);
 }
 
-// ── Run RAG agent ──────────────────────────────────────────────────────────
+// ── Run agent ────────────────────────────────────────────
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_example_bt_1agent_MainActivity_generateText(
-        JNIEnv* env, jobject thiz,
-        jstring pdfPath, jstring storeDir, jstring prompt)
+        JNIEnv* env, jobject thiz, jstring jquery)
 {
-    const char* pdf   = env->GetStringUTFChars(pdfPath,  nullptr);
-    const char* store = env->GetStringUTFChars(storeDir, nullptr);
-    const char* text  = env->GetStringUTFChars(prompt,   nullptr);
+    const char* q = env->GetStringUTFChars(jquery, nullptr);
+    std::string query(q);
+    env->ReleaseStringUTFChars(jquery, q);
 
+    // 🔥 STORE JVM + ACTIVITY
     JavaVM* jvm;
     env->GetJavaVM(&jvm);
     jobject globalThiz = env->NewGlobalRef(thiz);
 
-    jclass     cls          = env->GetObjectClass(thiz);
-    jmethodID  streamMethod = env->GetMethodID(cls, "streamToken",  "(Ljava/lang/String;)V");
-    jmethodID  statusMethod = env->GetMethodID(cls, "streamStatus", "(Ljava/lang/String;)V");
+    agent_set_jni(jvm, globalThiz);
 
-    std::string finalResult;
+    jclass cls = env->GetObjectClass(thiz);
+    jmethodID tok = env->GetMethodID(cls, "streamToken", "(Ljava/lang/String;)V");
+    jmethodID sts = env->GetMethodID(cls, "streamStatus", "(Ljava/lang/String;)V");
 
-    auto onToken = [jvm, globalThiz, streamMethod, &finalResult](const std::string& piece) {
+    auto onToken = [jvm, globalThiz, tok](const std::string& piece) {
         JNIEnv* e = nullptr;
         jvm->AttachCurrentThread(&e, nullptr);
+
         jstring js = e->NewStringUTF(piece.c_str());
-        e->CallVoidMethod(globalThiz, streamMethod, js);
+        e->CallVoidMethod(globalThiz, tok, js);
         e->DeleteLocalRef(js);
-        finalResult += piece;
     };
 
-    auto onStatus = [jvm, globalThiz, statusMethod](const std::string& s) {
+    auto onStatus = [jvm, globalThiz, sts](const std::string& msg) {
         JNIEnv* e = nullptr;
         jvm->AttachCurrentThread(&e, nullptr);
-        jstring js = e->NewStringUTF(s.c_str());
-        e->CallVoidMethod(globalThiz, statusMethod, js);
+
+        jstring js = e->NewStringUTF(msg.c_str());
+        e->CallVoidMethod(globalThiz, sts, js);
         e->DeleteLocalRef(js);
     };
 
-    run_agent(pdf, store, text, onToken, onStatus);
+    run_agent(query, onToken, onStatus);
 
-    // Return the final validated answer from the blackboard
-    const std::string& answer = get_blackboard().final_answer;
-    finalResult = answer.empty() ? finalResult : answer;
-
-    env->ReleaseStringUTFChars(pdfPath,  pdf);
-    env->ReleaseStringUTFChars(storeDir, store);
-    env->ReleaseStringUTFChars(prompt,   text);
-    env->DeleteGlobalRef(globalThiz);
-
-    return env->NewStringUTF(finalResult.c_str());
+    return env->NewStringUTF("");
 }

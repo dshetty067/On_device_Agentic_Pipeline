@@ -1,14 +1,19 @@
 #pragma once
 #include <string>
 #include <functional>
-#include "llama.h"
 
 void load_model(const std::string& path);
 
-std::string generate(
-        const std::string& prompt,
+std::string classify_intent(const std::string& query);
+
+std::string general_answer(
+        const std::string& query,
         std::function<void(const std::string&)> on_token = nullptr
 );
 
-const llama_vocab* get_vocab();
-llama_context*     get_ctx();
+std::string refined_answer(
+        const std::string& query,
+        const std::string& tool_name,
+        const std::string& tool_result,
+        std::function<void(const std::string&)> on_token = nullptr
+);

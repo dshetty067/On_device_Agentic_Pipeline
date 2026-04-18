@@ -57,7 +57,7 @@ void vector_store_build(
     }
 
     // Set ef for search (higher = more accurate, slower)
-    g_index->setEf(50);
+    g_index->setEf(100);
 
     g_ready = true;
     LOGI("HNSW index built: %d vectors, dim=%d", max_elements, g_dim);
@@ -154,31 +154,71 @@ std::vector<SearchResult> vector_store_search(
     int k = std::min(top_k, (int)g_index->getCurrentElementCount());
     if (k == 0) return {};
 
-    // hnswlib returns a priority queue of (dist, label)
     auto result = g_index->searchKnn(query_emb.data(), k);
 
-    // Convert to vector (comes out closest-last, so reverse)
-    std::vector<SearchResult> out;
+    std::vector<SearchResult> temp;
+
     while (!result.empty()) {
         auto [dist, label] = result.top();
         result.pop();
 
         int idx = (int)label;
-        // For InnerProduct space, dist = 1 - dot, so score = 1 - dist
-        float score = 1.0f - dist;
+        float score = 1.0f - dist; // cosine similarity
 
-        LOGI("SearchResult: chunk=%d score=%.4f", idx, score);
-
-        out.push_back({
-                              idx,
-                              score,
-                              (idx < (int)g_chunks.size()) ? g_chunks[idx] : ""
-                      });
+        temp.push_back({
+                               idx,
+                               score,
+                               g_chunks[idx]
+                       });
     }
 
-    // Reverse so highest score is first
-    std::reverse(out.begin(), out.end());
-    return out;
+    // reverse (highest first)
+    std::reverse(temp.begin(), temp.end());
+
+    // 🔥 FILTER + FINAL OUTPUT
+    std::vector<SearchResult> final;
+    float threshold = 0.4f;
+
+    for (auto& r : temp) {
+        if (r.score >= threshold) {
+            final.push_back(r);
+        }
+    }
+
+    // fallback if nothing passes threshold
+    if (final.empty()) {
+        final = temp;
+    }
+
+    return final;
+}
+
+float cosine_similarity(
+        const std::vector<float>& a,
+        const std::vector<float>& b)
+{
+    float dot = 0.0f;
+    for (int i = 0; i < a.size(); i++) {
+        dot += a[i] * b[i];
+    }
+    return dot;
+}
+
+std::vector<SearchResult> rerank_results(
+        const std::vector<float>& query_emb,
+        std::vector<SearchResult>& results,
+        const std::vector<std::vector<float>>& stored_embeddings)
+{
+    for (auto& r : results) {
+        r.score = cosine_similarity(query_emb, stored_embeddings[r.chunk_index]);
+    }
+
+    std::sort(results.begin(), results.end(),
+              [](auto& a, auto& b) {
+                  return a.score > b.score;
+              });
+
+    return results;
 }
 
 bool vector_store_is_ready() { return g_ready; }

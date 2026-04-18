@@ -200,54 +200,55 @@ std::vector<std::string> load_and_chunk_pdf(
         return chunks;
     }
 
-    // ── Assemble sentence-aware chunks ──────────────────────────────────────
+    // ── Assemble sentence-aware chunks (FIXED VERSION) ──────────────────────
     std::vector<std::string> chunks;
-    std::string cur_chunk;
-    cur_chunk.reserve(chunk_size + 200);
+    std::vector<std::string> window;
 
-    // overlap_sentences: keep track of the last few sentences for the next chunk
-    std::vector<std::string> overlap_buf;
+    int current_len = 0;
 
-    for (size_t si = 0; si < sentences.size(); ++si) {
-        const std::string& sent = sentences[si];
+    for (const auto& sent : sentences) {
+        window.push_back(sent);
+        current_len += sent.size();
 
-        if (cur_chunk.empty()) {
-            cur_chunk = sent;
-        } else {
-            cur_chunk += ' ';
-            cur_chunk += sent;
-        }
+        if (current_len >= chunk_size) {
+            // Build chunk
+            std::string chunk;
+            for (auto& s : window) {
+                if (!chunk.empty()) chunk += " ";
+                chunk += s;
+            }
+            chunks.push_back(chunk);
 
-        // When chunk is big enough, flush it
-        if ((int)cur_chunk.size() >= chunk_size) {
-            chunks.push_back(cur_chunk);
-            LOGI("Chunk %zu: %zu chars", chunks.size(), cur_chunk.size());
+            LOGI("Chunk %zu: %zu chars", chunks.size(), chunk.size());
 
-            // Build overlap: collect sentences from the end of cur_chunk
-            // until we have ~overlap chars worth
-            overlap_buf.clear();
+            // Build overlap (CORRECT way)
+            std::vector<std::string> new_window;
             int acc = 0;
-            // Walk backwards through sentences that contributed to this chunk
-            // Simple approach: rewind si by enough sentences to cover overlap chars
-            int rewind = 0;
-            for (int back = (int)si; back >= 0 && acc < overlap; --back) {
-                acc += (int)sentences[back].size() + 1;
-                ++rewind;
+
+            for (int i = (int)window.size() - 1; i >= 0; --i) {
+                acc += window[i].size();
+                new_window.insert(new_window.begin(), window[i]);
+                if (acc >= overlap) break;
             }
-            // Start next chunk from (si - rewind + 1)
-            size_t restart = (si >= (size_t)rewind) ? si - rewind + 1 : 0;
-            cur_chunk.clear();
-            for (size_t r = restart; r <= si; ++r) {
-                if (!cur_chunk.empty()) cur_chunk += ' ';
-                cur_chunk += sentences[r];
-            }
+
+            window = new_window;
+
+            // recalc length
+            current_len = 0;
+            for (auto& s : window) current_len += s.size();
         }
     }
 
-    // flush the last partial chunk
-    if (!cur_chunk.empty()) {
-        chunks.push_back(cur_chunk);
-        LOGI("Chunk %zu (final): %zu chars", chunks.size(), cur_chunk.size());
+// last chunk
+    if (!window.empty()) {
+        std::string chunk;
+        for (auto& s : window) {
+            if (!chunk.empty()) chunk += " ";
+            chunk += s;
+        }
+        chunks.push_back(chunk);
+
+        LOGI("Chunk %zu (final): %zu chars", chunks.size(), chunk.size());
     }
 
     LOGI("Total chunks: %zu", chunks.size());

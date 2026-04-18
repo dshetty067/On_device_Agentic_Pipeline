@@ -25,4 +25,15 @@ std::vector<SearchResult> vector_store_search(
         int top_k = 3
 );
 
+float cosine_similarity(
+        const std::vector<float>& a,
+        const std::vector<float>& b
+);
+
+std::vector<SearchResult> rerank_results(
+        const std::vector<float>& query_emb,
+        std::vector<SearchResult>& results,
+        const std::vector<std::vector<float>>& stored_embeddings
+);
+
 bool vector_store_is_ready();
